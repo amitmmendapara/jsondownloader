@@ -1,0 +1,483 @@
+const { redisClient } = require("../../config/redisClient.js");
+
+const Advertisement = require("../../model/advertisementSetting.model.js");
+const deviceRefferalModel = require("../../model/deviceRefferal.model.js");
+
+const SETTING_TYPES = {
+    NORMAL: "normal",
+    MARKETING: "marketing",
+};
+
+const getRedisKey = (settingType, packageName) =>
+    settingType === SETTING_TYPES.MARKETING
+        ? `advertisement:${packageName}`
+        : `advertisement:normal:${packageName}`;
+
+const getRequestedSettingType = (body) => {
+    const value = body.settingType ?? body.type ?? body.userType;
+
+    if (typeof value !== "string") {
+        return null;
+    }
+
+    const normalizedValue = value.trim().toLowerCase();
+
+    if (
+        ["marketing", "marketinguser", "marketing_user"].includes(
+            normalizedValue
+        )
+    ) {
+        return SETTING_TYPES.MARKETING;
+    }
+
+    if (normalizedValue === SETTING_TYPES.NORMAL) {
+        return SETTING_TYPES.NORMAL;
+    }
+
+    return null;
+};
+
+const validateSettings = (settings, fieldName) => {
+    if (!Array.isArray(settings)) {
+        return `${fieldName} must be an array`;
+    }
+
+    for (const setting of settings) {
+        if (typeof setting?.key !== "string" || !setting.key.trim()) {
+            return `Key is required in ${fieldName}`;
+        }
+
+        if (
+            Object.prototype.hasOwnProperty.call(setting, "value") &&
+            setting.value !== null &&
+            !["string", "boolean", "number"].includes(typeof setting.value)
+        ) {
+            return `Value in ${fieldName} must be a string, boolean, number, or null`;
+        }
+    }
+
+    return null;
+};
+
+const cleanSettings = (settings) =>
+    settings.map((setting) => ({
+        key: setting.key.trim(),
+        value: Object.prototype.hasOwnProperty.call(setting, "value")
+            ? setting.value
+            : null,
+    }));
+
+const getSettingsFromBody = (body, { isUpdate = false } = {}) => {
+    const hasNormalSetting = Object.prototype.hasOwnProperty.call(
+        body,
+        "normalSetting"
+    );
+    const hasMarketingUserSetting = Object.prototype.hasOwnProperty.call(
+        body,
+        "marketingUserSetting"
+    );
+    const hasSettings = Object.prototype.hasOwnProperty.call(body, "settings");
+    const requestedType = getRequestedSettingType(body);
+    const suppliedType = body.settingType ?? body.type ?? body.userType;
+
+    if (hasSettings && suppliedType !== undefined && !requestedType) {
+        return { error: "settingType must be either normal or marketing" };
+    }
+
+    const result = {};
+
+    if (hasNormalSetting) {
+        result.normalSetting = body.normalSetting;
+    }
+
+    if (hasMarketingUserSetting) {
+        result.marketingUserSetting = body.marketingUserSetting;
+    }
+
+    // Also support a request that updates only one group:
+    // { settingType: "normal|marketing", settings: [...] }.
+    if (hasSettings) {
+        if (requestedType === SETTING_TYPES.MARKETING) {
+            result.marketingUserSetting = body.settings;
+        } else {
+            result.normalSetting = body.settings;
+        }
+    }
+
+    if (Object.keys(result).length === 0) {
+        return {
+            error: "normalSetting, marketingUserSetting, or settings is required",
+        };
+    }
+
+    if (!isUpdate && !("normalSetting" in result)) {
+        result.normalSetting = [];
+    }
+
+    if (!isUpdate && !("marketingUserSetting" in result)) {
+        result.marketingUserSetting = [];
+    }
+
+    for (const [fieldName, settings] of Object.entries(result)) {
+        const error = validateSettings(settings, fieldName);
+
+        if (error) {
+            return { error };
+        }
+
+        result[fieldName] = cleanSettings(settings);
+    }
+
+    return { settings: result };
+};
+
+const getRedisValue = (advertisement, settingType) => ({
+    appName: advertisement.appName,
+    packageName: advertisement.packageName,
+    status: advertisement.status,
+    settings:
+        settingType === SETTING_TYPES.MARKETING
+            ? advertisement.marketingUserSetting
+            : advertisement.normalSetting,
+});
+
+const storeAdvertisementInRedis = async (advertisement) => {
+    await Promise.all([
+        redisClient.set(
+            getRedisKey(SETTING_TYPES.NORMAL, advertisement.packageName),
+            JSON.stringify(getRedisValue(advertisement, SETTING_TYPES.NORMAL))
+        ),
+        redisClient.set(
+            getRedisKey(SETTING_TYPES.MARKETING, advertisement.packageName),
+            JSON.stringify(getRedisValue(advertisement, SETTING_TYPES.MARKETING))
+        ),
+        // Remove the previous marketing namespace after switching key formats.
+        redisClient.del(
+            `advertisement:marketing:${advertisement.packageName}`
+        ),
+    ]);
+};
+
+exports.storeAdvertisement = async (req, res, next) => {
+    try {
+        const { appName, packageName, status } = req.body;
+
+        if (!appName?.trim()) {
+            return res.status(400).json({
+                success: false,
+                message: "App name is required",
+            });
+        }
+
+        if (!packageName?.trim()) {
+            return res.status(400).json({
+                success: false,
+                message: "Package name is required",
+            });
+        }
+
+        const parsedSettings = getSettingsFromBody(req.body);
+
+        if (parsedSettings.error) {
+            return res.status(400).json({
+                success: false,
+                message: parsedSettings.error,
+            });
+        }
+
+        const trimmedAppName = appName.trim();
+        const trimmedPackageName = packageName.trim();
+
+        // Check same packageName already exists
+        const existingAdvertisement = await Advertisement.findOne({
+            packageName: trimmedPackageName,
+        });
+
+        if (existingAdvertisement) {
+            return res.status(400).json({
+                success: false,
+                message: "Advertisement with this package name already exists",
+            });
+        }
+
+        // Create new advertisement
+        const advertisement = await Advertisement.create({
+            appName: trimmedAppName,
+            packageName: trimmedPackageName,
+            status: typeof status === "boolean" ? status : true,
+            ...parsedSettings.settings,
+        });
+
+        await storeAdvertisementInRedis(advertisement);
+
+        return res.status(200).json({
+            success: true,
+            message: "Advertisement configuration saved successfully",
+            data: advertisement,
+        });
+
+    } catch (error) {
+        console.error("Error storing advertisement:", error);
+
+        return res.status(500).json({
+            success: false,
+            message: "Failed to save advertisement configuration",
+            error: error.message,
+        });
+    }
+};
+
+exports.getAdvertisement = async (req, res, next) => {
+    try {
+        const search = req.query.search?.trim() || "";
+        const status = req.query.status;
+
+        const page = parseInt(req.query.page) || 1;
+        const limit = parseInt(req.query.limit) || 10;
+        const skip = (page - 1) * limit;
+
+        const query = {};
+
+        if (search) {
+            query.appName = {
+                $regex: search,
+                $options: "i",
+            };
+        }
+
+        if (status === "true") {
+            query.status = true;
+        } else if (status === "false") {
+            query.status = false;
+        }
+
+        const totalAdvertisements = await Advertisement.countDocuments(query);
+
+        const advertisements = await Advertisement.find(query)
+            .sort({ createdAt: -1 })
+            .skip(skip)
+            .limit(limit);
+
+        return res.status(200).json({
+            success: true,
+            message: "Advertisement fetched successfully",
+            data: advertisements,
+            page,
+            totalPages: Math.ceil(totalAdvertisements / limit),
+            totalCount: totalAdvertisements,
+        });
+
+    } catch (err) {
+        console.error("❌ getAdvertisement error:", err);
+
+        return res.status(500).json({
+            success: false,
+            message: "Failed to fetch advertisement configuration",
+            error: err.message,
+        });
+    }
+};
+
+exports.updateAdvertisement = async (req, res, next) => {
+    try {
+        const { id, appName, packageName, status } = req.body;
+
+        // Validate _id
+        if (!id) {
+            return res.status(400).json({
+                success: false,
+                message: "id is required",
+            });
+        }
+
+        // Validate appName
+        if (!appName?.trim()) {
+            return res.status(400).json({
+                success: false,
+                message: "App name is required",
+            });
+        }
+
+        // Validate packageName
+        if (!packageName?.trim()) {
+            return res.status(400).json({
+                success: false,
+                message: "Package name is required",
+            });
+        }
+
+        const parsedSettings = getSettingsFromBody(req.body, {
+            isUpdate: true,
+        });
+
+        if (parsedSettings.error) {
+            return res.status(400).json({
+                success: false,
+                message: parsedSettings.error,
+            });
+        }
+
+        const trimmedAppName = appName.trim();
+        const trimmedPackageName = packageName.trim();
+
+        // Find advertisement by _id
+        const advertisement = await Advertisement.findById(id);
+
+        if (!advertisement) {
+            return res.status(404).json({
+                success: false,
+                message: "Advertisement configuration not found",
+            });
+        }
+
+        // Check same packageName in another record
+        const existingPackage = await Advertisement.findOne({
+            packageName: trimmedPackageName,
+            _id: { $ne: id },
+        });
+
+        if (existingPackage) {
+            return res.status(400).json({
+                success: false,
+                message: "Advertisement with this package name already exists",
+            });
+        }
+
+        const oldPackageName = advertisement.packageName;
+
+        // Update MongoDB
+        advertisement.appName = trimmedAppName;
+        advertisement.packageName = trimmedPackageName;
+
+        if (typeof status === "boolean") {
+            advertisement.status = status;
+        }
+
+        for (const [fieldName, settings] of Object.entries(
+            parsedSettings.settings
+        )) {
+            advertisement[fieldName] = settings;
+        }
+
+        await advertisement.save();
+
+        if (oldPackageName !== advertisement.packageName) {
+            await Promise.all([
+                redisClient.del(
+                    getRedisKey(SETTING_TYPES.NORMAL, oldPackageName)
+                ),
+                redisClient.del(
+                    getRedisKey(SETTING_TYPES.MARKETING, oldPackageName)
+                ),
+                redisClient.del(
+                    `advertisement:marketing:${oldPackageName}`
+                ),
+            ]);
+        }
+
+        await storeAdvertisementInRedis(advertisement);
+
+        return res.status(200).json({
+            success: true,
+            message: "Advertisement configuration updated successfully",
+            data: advertisement,
+        });
+
+    } catch (error) {
+        console.error("Error updating advertisement:", error);
+
+        return res.status(500).json({
+            success: false,
+            message: "Failed to update advertisement configuration",
+            error: error.message,
+        });
+    }
+};
+
+
+exports.getAdvertise = async (req, res, next) => {
+    try {
+        const { packageName, refferal_url, deviceId, isStage } = req.body;
+
+        if (!packageName?.trim()) {
+            return res.status(400).json({
+                success: false,
+                message: "packageName is required",
+            });
+        }
+
+        const isFromUserMarketing =
+            typeof refferal_url === "string" &&
+            // refferal_url.includes("gclid");
+            refferal_url.includes("jaydipgodhani");
+
+
+            let isFromReferral = false;
+
+        if (deviceId) {
+            const alreadyExist = await deviceRefferalModel.findOne({
+                deviceId,
+            });
+
+            if (!alreadyExist) {
+                isFromReferral = isFromUserMarketing;
+
+                await deviceRefferalModel.create({
+                    deviceId,
+                    packageName,
+                    isFromReferral,
+                });
+            } else {
+                if (alreadyExist.isFromReferral === true) {
+                    if (isFromUserMarketing) {
+                        isFromReferral = true;
+                    } else {
+                        isFromReferral = false;
+
+                        await deviceRefferalModel.updateOne(
+                            {
+                                deviceId,
+                            },
+                            {
+                                $set: {
+                                    isFromReferral: false,
+                                },
+                            }
+                        );
+                    }
+                } else {
+                    isFromReferral = false;
+                }
+            }
+        }
+
+        let selectedPackageName = packageName.trim();
+        if (isStage == true) {
+            selectedPackageName = "com.stage.tvanimespace";
+        }
+
+        const settingType = isFromReferral
+            ? SETTING_TYPES.MARKETING
+            : SETTING_TYPES.NORMAL;
+        const key = getRedisKey(settingType, selectedPackageName);
+        const packageData = await redisClient.get(key);
+        const Package = packageData ? JSON.parse(packageData) : null;
+
+        return res.status(200).json({
+            success: true,
+            message: "Advertisement fetched successfully",
+            data: {
+                ...Package,
+                isFromReferral,
+            },
+        });
+    } catch (err) {
+        console.error(":x: getAdvertise error:", err);
+
+        return res.status(500).json({
+            success: false,
+            message: "Failed to fetch advertisement configuration",
+            error: err.message,
+        });
+    }
+};
