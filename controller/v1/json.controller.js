@@ -13,6 +13,24 @@ const getRedisKey = (settingType, packageName) =>
         ? `advertisement:${packageName}`
         : `advertisement:normal:${packageName}`;
 
+const getReferralRedisKey = (packageName) =>
+    `advertisement:referral:${packageName}`;
+
+const getReferralKeys = (referralKey) =>
+    typeof referralKey === "string"
+        ? [
+              ...new Set(
+                  referralKey
+                      .split(",")
+                      .map((key) => key.trim())
+                      .filter(Boolean)
+              ),
+          ]
+        : [];
+
+const normalizeReferralKey = (referralKey) =>
+    getReferralKeys(referralKey).join(",");
+
 const getRequestedSettingType = (body) => {
     const value = body.settingType ?? body.type ?? body.userType;
 
@@ -62,9 +80,10 @@ const validateSettings = (settings, fieldName) => {
 const cleanSettings = (settings) =>
     settings.map((setting) => ({
         key: setting.key.trim(),
-        value: Object.prototype.hasOwnProperty.call(setting, "value")
-            ? setting.value
-            : null,
+        value:
+            setting.value === undefined || setting.value === null
+                ? ""
+                : String(setting.value).trim(),
     }));
 
 const getSettingsFromBody = (body, { isUpdate = false } = {}) => {
@@ -151,16 +170,37 @@ const storeAdvertisementInRedis = async (advertisement) => {
             getRedisKey(SETTING_TYPES.MARKETING, advertisement.packageName),
             JSON.stringify(getRedisValue(advertisement, SETTING_TYPES.MARKETING))
         ),
-        // Remove the previous marketing namespace after switching key formats.
-        redisClient.del(
-            `advertisement:marketing:${advertisement.packageName}`
-        ),
+        redisClient.set(
+            getReferralRedisKey(advertisement.packageName),
+            normalizeReferralKey(advertisement.referralKey) || "gclid"
+        )
     ]);
+};
+
+const getPackageReferralKey = async (packageName) => {
+    const redisKey = getReferralRedisKey(packageName);
+    const cachedReferralKey = await redisClient.get(redisKey);
+
+    if (cachedReferralKey) {
+        return cachedReferralKey;
+    }
+
+    const advertisement = await Advertisement.findOne({ packageName });
+    const referralKey =
+        normalizeReferralKey(advertisement?.referralKey) || "gclid";
+
+    if (advertisement) {
+        await redisClient.set(redisKey, referralKey);
+    }
+
+    return referralKey;
 };
 
 exports.storeAdvertisement = async (req, res, next) => {
     try {
         const { appName, packageName, status } = req.body;
+        const referralKey = req.body.referralKey ?? req.body.refferalKey;
+        const normalizedReferralKey = normalizeReferralKey(referralKey);
 
         if (!appName?.trim()) {
             return res.status(400).json({
@@ -173,6 +213,16 @@ exports.storeAdvertisement = async (req, res, next) => {
             return res.status(400).json({
                 success: false,
                 message: "Package name is required",
+            });
+        }
+
+        if (
+            referralKey !== undefined &&
+            !normalizedReferralKey
+        ) {
+            return res.status(400).json({
+                success: false,
+                message: "referralKey must be a non-empty string",
             });
         }
 
@@ -204,6 +254,8 @@ exports.storeAdvertisement = async (req, res, next) => {
         const advertisement = await Advertisement.create({
             appName: trimmedAppName,
             packageName: trimmedPackageName,
+            referralKey:
+                normalizedReferralKey || "gclid",
             status: typeof status === "boolean" ? status : true,
             ...parsedSettings.settings,
         });
@@ -281,6 +333,8 @@ exports.getAdvertisement = async (req, res, next) => {
 exports.updateAdvertisement = async (req, res, next) => {
     try {
         const { id, appName, packageName, status } = req.body;
+        const referralKey = req.body.referralKey ?? req.body.refferalKey;
+        const normalizedReferralKey = normalizeReferralKey(referralKey);
 
         // Validate _id
         if (!id) {
@@ -303,6 +357,16 @@ exports.updateAdvertisement = async (req, res, next) => {
             return res.status(400).json({
                 success: false,
                 message: "Package name is required",
+            });
+        }
+
+        if (
+            referralKey !== undefined &&
+            !normalizedReferralKey
+        ) {
+            return res.status(400).json({
+                success: false,
+                message: "referralKey must be a non-empty string",
             });
         }
 
@@ -349,6 +413,10 @@ exports.updateAdvertisement = async (req, res, next) => {
         advertisement.appName = trimmedAppName;
         advertisement.packageName = trimmedPackageName;
 
+        if (referralKey !== undefined) {
+            advertisement.referralKey = normalizedReferralKey;
+        }
+
         if (typeof status === "boolean") {
             advertisement.status = status;
         }
@@ -372,6 +440,7 @@ exports.updateAdvertisement = async (req, res, next) => {
                 redisClient.del(
                     `advertisement:marketing:${oldPackageName}`
                 ),
+                redisClient.del(getReferralRedisKey(oldPackageName)),
             ]);
         }
 
@@ -406,54 +475,35 @@ exports.getAdvertise = async (req, res, next) => {
             });
         }
 
+        let selectedPackageName = packageName.trim();
+        if (isStage == true) {
+            selectedPackageName = "com.stage.tvanimespace";
+        }
+
+        const referralKey = await getPackageReferralKey(selectedPackageName);
+        const referralKeys = getReferralKeys(referralKey);
         const isFromUserMarketing =
             typeof refferal_url === "string" &&
-            // refferal_url.includes("gclid");
-            refferal_url.includes("jaydipgodhani");
+            referralKeys.some((key) => refferal_url.includes(key));
 
-
-            let isFromReferral = false;
+        let isFromReferral = isFromUserMarketing;
 
         if (deviceId) {
             const alreadyExist = await deviceRefferalModel.findOne({
                 deviceId,
+                packageName: selectedPackageName,
             });
 
             if (!alreadyExist) {
-                isFromReferral = isFromUserMarketing;
-
                 await deviceRefferalModel.create({
                     deviceId,
-                    packageName,
+                    packageName: selectedPackageName,
                     isFromReferral,
                 });
             } else {
-                if (alreadyExist.isFromReferral === true) {
-                    if (isFromUserMarketing) {
-                        isFromReferral = true;
-                    } else {
-                        isFromReferral = false;
-
-                        await deviceRefferalModel.updateOne(
-                            {
-                                deviceId,
-                            },
-                            {
-                                $set: {
-                                    isFromReferral: false,
-                                },
-                            }
-                        );
-                    }
-                } else {
-                    isFromReferral = false;
-                }
+                // The first request permanently classifies this device/package.
+                isFromReferral = alreadyExist.isFromReferral === true;
             }
-        }
-
-        let selectedPackageName = packageName.trim();
-        if (isStage == true) {
-            selectedPackageName = "com.stage.tvanimespace";
         }
 
         const settingType = isFromReferral
@@ -468,7 +518,7 @@ exports.getAdvertise = async (req, res, next) => {
             message: "Advertisement fetched successfully",
             data: {
                 ...Package,
-                isFromReferral,
+                isFromReferral: true, // this is static true all time we managed based on config data
             },
         });
     } catch (err) {

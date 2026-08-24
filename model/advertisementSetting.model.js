@@ -9,15 +9,9 @@ const advertisementSettingSchema = new mongoose.Schema(
         },
 
         value: {
-            type: mongoose.Schema.Types.Mixed,
-            default: null,
-            validate: {
-                validator: (value) =>
-                    value === null ||
-                    ["string", "boolean", "number"].includes(typeof value),
-                message:
-                    "Setting value must be a string, boolean, number, or null",
-            },
+            type: String,
+            default: "",
+            trim: true,
         },
     },
     {
@@ -38,6 +32,12 @@ const advertisementSchema = new mongoose.Schema(
             required: true,
             trim: true,
             unique: true,
+        },
+
+        referralKey: {
+            type: String,
+            required: true,
+            trim: true,
         },
 
         // Whole package ON/OFF

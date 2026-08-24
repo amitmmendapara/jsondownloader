@@ -7,6 +7,18 @@
     "test": "echo \"Error: no test specified\" && exit 1",
     "start": "nodemon server.js"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tapnot/tepnot_social_api.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/tapnot/tepnot_social_api/issues"
+  },
+  "homepage": "https://github.com/tapnot/tepnot_social_api#readme",
   "dependencies": {
     "compression": "^1.8.1",
     "cors": "^2.8.6",
