@@ -311,12 +311,71 @@ exports.getAdvertisement = async (req, res, next) => {
         const advertisements = await Advertisement.find(query)
             .sort({ createdAt: -1 })
             .skip(skip)
-            .limit(limit);
+            .limit(limit)
+            .lean();
+
+        const packageNames = advertisements.map(
+            (advertisement) => advertisement.packageName
+        );
+
+        const deviceCounts = await deviceRefferalModel.aggregate([
+            {
+                $match: {
+                    packageName: { $in: packageNames },
+                    $or: [
+                        { isLauncherSet: true },
+                        { isContinueButtonSet: true },
+                    ],
+                },
+            },
+            {
+                // Count every device only once inside each package.
+                $group: {
+                    _id: {
+                        packageName: "$packageName",
+                        deviceId: "$deviceId",
+                    },
+                    isLauncherSet: {
+                        $max: { $cond: ["$isLauncherSet", 1, 0] },
+                    },
+                    isContinueButtonSet: {
+                        $max: { $cond: ["$isContinueButtonSet", 1, 0] },
+                    },
+                },
+            },
+            {
+                $group: {
+                    _id: "$_id.packageName",
+                    isLauncherSetDeviceCount: { $sum: "$isLauncherSet" },
+                    isContinueButtonSetDeviceCount: {
+                        $sum: "$isContinueButtonSet",
+                    },
+                },
+            },
+        ]);
+
+        const deviceCountMap = new Map(
+            deviceCounts.map((count) => [count._id, count])
+        );
+
+        const advertisementsWithDeviceCounts = advertisements.map(
+            (advertisement) => {
+                const counts = deviceCountMap.get(advertisement.packageName);
+
+                return {
+                    ...advertisement,
+                    isLauncherSetDeviceCount:
+                        counts?.isLauncherSetDeviceCount || 0,
+                    isContinueButtonSetDeviceCount:
+                        counts?.isContinueButtonSetDeviceCount || 0,
+                };
+            }
+        );
 
         return res.status(200).json({
             success: true,
             message: "Advertisement fetched successfully",
-            data: advertisements,
+            data: advertisementsWithDeviceCounts,
             page,
             totalPages: Math.ceil(totalAdvertisements / limit),
             totalCount: totalAdvertisements,
