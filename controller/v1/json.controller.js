@@ -55,6 +55,30 @@ const getRequestedSettingType = (body) => {
     return null;
 };
 
+const SNAPSHOT_CONFIG = {
+    [SETTING_TYPES.NORMAL]: {
+        settingField: "normalSetting",
+        snapshotField: "normalSettingSnapshot",
+    },
+    [SETTING_TYPES.MARKETING]: {
+        settingField: "marketingUserSetting",
+        snapshotField: "marketingUserSettingSnapshot",
+    },
+};
+
+const getSnapshotConfig = (body) => {
+    const settingType = getRequestedSettingType(body);
+
+    if (!settingType) {
+        return null;
+    }
+
+    return {
+        settingType,
+        ...SNAPSHOT_CONFIG[settingType],
+    };
+};
+
 const validateSettings = (settings, fieldName) => {
     if (!Array.isArray(settings)) {
         return `${fieldName} must be an array`;
@@ -84,6 +108,21 @@ const cleanSettings = (settings) =>
             setting.value === undefined || setting.value === null
                 ? ""
                 : String(setting.value).trim(),
+    }));
+
+const copyAdvertisementSettings = (settings) =>
+    settings.map((setting) => ({
+        key: setting.key,
+        value: setting.value,
+    }));
+
+const turnTrueAdvertisementSettingsOff = (settings) =>
+    settings.map((setting) => ({
+        key: setting.key,
+        value:
+            setting.value === true || setting.value === "true"
+                ? "false"
+                : setting.value,
     }));
 
 const getSettingsFromBody = (body, { isUpdate = false } = {}) => {
@@ -392,6 +431,153 @@ exports.getAdvertisement = async (req, res, next) => {
     }
 };
 
+exports.takeAdvertisementSnapshot = async (req, res) => {
+    try {
+        const packageName = req.body.packageName?.trim();
+        const snapshotConfig = getSnapshotConfig(req.body);
+
+        if (!packageName) {
+            return res.status(400).json({
+                success: false,
+                message: "Package name is required",
+            });
+        }
+
+        if (!snapshotConfig) {
+            return res.status(400).json({
+                success: false,
+                message: "settingType must be either normal or marketing",
+            });
+        }
+
+        const { settingType, settingField, snapshotField } = snapshotConfig;
+
+        const advertisement = await Advertisement.findOne({ packageName });
+
+        if (!advertisement) {
+            return res.status(404).json({
+                success: false,
+                message: "Advertisement configuration not found",
+            });
+        }
+
+        if (advertisement[snapshotField]) {
+            return res.status(409).json({
+                success: false,
+                message:
+                    `A pending ${settingType} snapshot already exists for this package`,
+                data: advertisement[snapshotField],
+            });
+        }
+
+        advertisement[snapshotField] = {
+            settings: copyAdvertisementSettings(
+                advertisement[settingField]
+            ),
+            snapshotAt: new Date(),
+        };
+        advertisement[settingField] = turnTrueAdvertisementSettingsOff(
+            advertisement[settingField]
+        );
+
+        await advertisement.save();
+        await storeAdvertisementInRedis(advertisement);
+
+        return res.status(200).json({
+            success: true,
+            message:
+                `${settingType} advertisement snapshot created and true values disabled successfully`,
+            data: {
+                packageName: advertisement.packageName,
+                settingType,
+                snapshot: advertisement[snapshotField],
+                settings: advertisement[settingField],
+            },
+        });
+    } catch (error) {
+        console.error("Error taking advertisement snapshot:", error);
+
+        return res.status(500).json({
+            success: false,
+            message: "Failed to take advertisement snapshot",
+            error: error.message,
+        });
+    }
+};
+
+exports.applyAdvertisementSnapshot = async (req, res) => {
+    try {
+        const packageName = req.body.packageName?.trim();
+        const snapshotConfig = getSnapshotConfig(req.body);
+
+        if (!packageName) {
+            return res.status(400).json({
+                success: false,
+                message: "Package name is required",
+            });
+        }
+
+        if (!snapshotConfig) {
+            return res.status(400).json({
+                success: false,
+                message: "settingType must be either normal or marketing",
+            });
+        }
+
+        const { settingType, settingField, snapshotField } = snapshotConfig;
+
+        const advertisement = await Advertisement.findOne({ packageName });
+
+        if (!advertisement) {
+            return res.status(404).json({
+                success: false,
+                message: "Advertisement configuration not found",
+            });
+        }
+
+        if (!advertisement[snapshotField]) {
+            return res.status(404).json({
+                success: false,
+                message:
+                    `No pending ${settingType} snapshot found for this package`,
+            });
+        }
+
+        const snapshotAt = advertisement[snapshotField].snapshotAt;
+
+        // Fully replace only the selected array with its own snapshot.
+        advertisement[settingField] = copyAdvertisementSettings(
+            advertisement[snapshotField].settings
+        );
+
+        // Keep the snapshot until MongoDB and Redis contain the restored data.
+        await advertisement.save();
+        await storeAdvertisementInRedis(advertisement);
+
+        advertisement[snapshotField] = null;
+        await advertisement.save();
+
+        return res.status(200).json({
+            success: true,
+            message:
+                `${settingType} advertisement snapshot applied successfully`,
+            data: {
+                advertisement,
+                settingType,
+                appliedSnapshotAt: snapshotAt,
+            },
+        });
+    } catch (error) {
+        console.error("Error applying advertisement snapshot:", error);
+
+        return res.status(500).json({
+            success: false,
+            message: "Failed to apply advertisement snapshot",
+            error: error.message,
+        });
+    }
+};
+
 exports.updateAdvertisement = async (req, res, next) => {
     try {
         const { id, appName, packageName, status } = req.body;
@@ -595,105 +781,105 @@ exports.getAdvertise = async (req, res, next) => {
     }
 };
 
-// exports.storeAdvertisementInRedis = async (req, res) => {
-//     try {
-//         const refernceDoc = await Advertisement.findOne({ packageName: "com.stage.tvanimespace" });
+exports.storeAdvertisementInRedis = async (req, res) => {
+    try {
+        const refernceDoc = await Advertisement.findOne({ packageName: "com.stage.tvanimespace" });
 
-//         const normalSeetings = refernceDoc.normalSetting;
-//         const marketingSeetings = refernceDoc.marketingUserSetting;
+        const normalSeetings = refernceDoc.normalSetting;
+        const marketingSeetings = refernceDoc.marketingUserSetting;
 
-//         const mainDocument = await Advertisement.findOne({ packageName: "com.animecloudapp.tvanimespace" });
+        const mainDocument = await Advertisement.findOne({ packageName: "quick.math.calculator" });
 
-//         const normalSeetingsMain = mainDocument.normalSetting;
-//         const marketingSeetingsMain = mainDocument.marketingUserSetting;
-//         const mainMap = new Map();
-//         const mainMarketingMap = new Map();
+        const normalSeetingsMain = mainDocument.normalSetting;
+        const marketingSeetingsMain = mainDocument.marketingUserSetting;
+        const mainMap = new Map();
+        const mainMarketingMap = new Map();
 
-//         for (const normalS of normalSeetingsMain) {
-//             mainMap.set(normalS.key, normalS);
-//         }
+        for (const normalS of normalSeetingsMain) {
+            mainMap.set(normalS.key, normalS);
+        }
 
-//         for (const marketingS of marketingSeetingsMain) {
-//             mainMarketingMap.set(marketingS.key, marketingS);
-//         }
+        for (const marketingS of marketingSeetingsMain) {
+            mainMarketingMap.set(marketingS.key, marketingS);
+        }
 
-//         const MaininnerNotexistKeysNormal = []
-//         for (const normalS of normalSeetings) {
-//             if (!mainMap.has(normalS.key)) {
-//                 MaininnerNotexistKeysNormal.push({
-//                     key: normalS.key,
-//                     value: normalS.value,
-//                 })
-//             }
-//         }
+        const MaininnerNotexistKeysNormal = []
+        for (const normalS of normalSeetings) {
+            if (!mainMap.has(normalS.key)) {
+                MaininnerNotexistKeysNormal.push({
+                    key: normalS.key,
+                    value: normalS.value,
+                })
+            }
+        }
 
-//         const MaininnerNotexistKeysMarketing = []
-//         for (const marketingS of marketingSeetings) {
-//             if (!mainMarketingMap.has(marketingS.key)) {
-//                 MaininnerNotexistKeysMarketing.push({
-//                     key: marketingS.key,
-//                     value: marketingS.value,
-//                 })
-//             }
-//         }
+        const MaininnerNotexistKeysMarketing = []
+        for (const marketingS of marketingSeetings) {
+            if (!mainMarketingMap.has(marketingS.key)) {
+                MaininnerNotexistKeysMarketing.push({
+                    key: marketingS.key,
+                    value: marketingS.value,
+                })
+            }
+        }
 
-//         const updatedDocument = await Advertisement.findOneAndUpdate({
-//             packageName: "com.animecloudapp.tvanimespace"
-//         },
-//             {
-//                 $push: {
-//                     normalSetting: {
-//                         $each: MaininnerNotexistKeysNormal
-//                     },
-//                     marketingUserSetting: {
-//                         $each: MaininnerNotexistKeysMarketing
-//                     }
-//                 }
-//             },
-//             {
-//                 new: true,
-//                 runValidators: true,
-//             }
-//         )
+        const updatedDocument = await Advertisement.findOneAndUpdate({
+            packageName: "quick.math.calculator"
+        },
+            {
+                $push: {
+                    normalSetting: {
+                        $each: MaininnerNotexistKeysNormal
+                    },
+                    marketingUserSetting: {
+                        $each: MaininnerNotexistKeysMarketing
+                    }
+                }
+            },
+            {
+                new: true,
+                runValidators: true,
+            }
+        )
 
-//         await storeAdvertisementInRedis(updatedDocument);
+        await storeAdvertisementInRedis(updatedDocument);
 
-//         const key = getRedisKey(SETTING_TYPES.NORMAL, "com.animecloudapp.tvanimespace");
-//         const packageData = await redisClient.get(key);
-//         const Package = packageData ? JSON.parse(packageData) : null;
-//         console.log("🚀 ~ Package:", Package.settings.length)
+        const key = getRedisKey(SETTING_TYPES.NORMAL, "quick.math.calculator");
+        const packageData = await redisClient.get(key);
+        const Package = packageData ? JSON.parse(packageData) : null;
+        console.log("🚀 ~ Package:", Package.settings.length)
 
-//         const keyM = getRedisKey(SETTING_TYPES.MARKETING, "com.animecloudapp.tvanimespace");
-//         const packageDataM = await redisClient.get(keyM);
-//         const PackageM = packageDataM ? JSON.parse(packageDataM) : null;
-//         console.log("🚀 ~ Package M:", PackageM.settings.length)
+        const keyM = getRedisKey(SETTING_TYPES.MARKETING, "quick.math.calculator");
+        const packageDataM = await redisClient.get(keyM);
+        const PackageM = packageDataM ? JSON.parse(packageDataM) : null;
+        console.log("🚀 ~ Package M:", PackageM.settings.length)
 
-//         return res.status(200).json({
-//             success: true,
-//             message: "Advertisement fetched successfully",
-//             data: {
-//                 MaininnerNotexistKeysNormal,
-//                 MaininnerNotexistKeysMarketing,
-//                 referncekeys: normalSeetings.length,
-//                 refernceMarketingKeys: marketingSeetings.length,
-//                 mainKeys: normalSeetingsMain.length,
-//                 mainMarketingKeys: marketingSeetingsMain.length,
-//                 addedKeys: MaininnerNotexistKeysNormal.length,
-//                 addedMarketingKeys: MaininnerNotexistKeysMarketing.length,
-//                 totalKeys: updatedDocument.normalSetting.length,
-//                 totalMarketingKeys: updatedDocument.marketingUserSetting.length,
-//                 totalMainKeys: updatedDocument.normalSetting.length + updatedDocument.marketingUserSetting.length
-//             },
-//         });
+        return res.status(200).json({
+            success: true,
+            message: "Advertisement fetched successfully",
+            data: {
+                MaininnerNotexistKeysNormal,
+                MaininnerNotexistKeysMarketing,
+                referncekeys: normalSeetings.length,
+                refernceMarketingKeys: marketingSeetings.length,
+                mainKeys: normalSeetingsMain.length,
+                mainMarketingKeys: marketingSeetingsMain.length,
+                addedKeys: MaininnerNotexistKeysNormal.length,
+                addedMarketingKeys: MaininnerNotexistKeysMarketing.length,
+                totalKeys: updatedDocument.normalSetting.length,
+                totalMarketingKeys: updatedDocument.marketingUserSetting.length,
+                totalMainKeys: updatedDocument.normalSetting.length + updatedDocument.marketingUserSetting.length
+            },
+        });
 
-//     } catch (error) {
-//         return res.status(400).json({
-//             success: false,
-//             message: error.message,
+    } catch (error) {
+        return res.status(400).json({
+            success: false,
+            message: error.message,
 
-//         });
-//     }
-// }
+        });
+    }
+}
 
 exports.LauncherSet = async (req, res) => {
     try {

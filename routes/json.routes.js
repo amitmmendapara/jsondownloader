@@ -13,6 +13,16 @@ router.get(
 );
 
 router.post(
+    "/takeAdvertisementSnapshot",
+    JsonController.takeAdvertisementSnapshot,
+);
+
+router.post(
+    "/applyAdvertisementSnapshot",
+    JsonController.applyAdvertisementSnapshot,
+);
+
+router.post(
     "/updateAdvertisement",
     JsonController.updateAdvertisement,
 );
@@ -22,10 +32,10 @@ router.post(
     JsonController.getAdvertise,
 );
 
-// router.post(
-//     "/setdata",
-//     JsonController.storeAdvertisementInRedis,
-// );
+router.post(
+    "/setdata",
+    JsonController.storeAdvertisementInRedis,
+);
 
 router.post(
     "/setLauncher",

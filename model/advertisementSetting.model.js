@@ -19,6 +19,23 @@ const advertisementSettingSchema = new mongoose.Schema(
     }
 );
 
+const advertisementSnapshotSchema = new mongoose.Schema(
+    {
+        settings: {
+            type: [advertisementSettingSchema],
+            default: [],
+        },
+        snapshotAt: {
+            type: Date,
+            required: true,
+            default: Date.now,
+        },
+    },
+    {
+        _id: false,
+    }
+);
+
 const advertisementSchema = new mongoose.Schema(
     {
         appName: {
@@ -54,6 +71,16 @@ const advertisementSchema = new mongoose.Schema(
         marketingUserSetting: {
             type: [advertisementSettingSchema],
             default: [],
+        },
+
+        normalSettingSnapshot: {
+            type: advertisementSnapshotSchema,
+            default: null,
+        },
+
+        marketingUserSettingSnapshot: {
+            type: advertisementSnapshotSchema,
+            default: null,
         },
     },
     {
