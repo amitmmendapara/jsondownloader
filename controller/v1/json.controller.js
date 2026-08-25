@@ -19,13 +19,13 @@ const getReferralRedisKey = (packageName) =>
 const getReferralKeys = (referralKey) =>
     typeof referralKey === "string"
         ? [
-              ...new Set(
-                  referralKey
-                      .split(",")
-                      .map((key) => key.trim())
-                      .filter(Boolean)
-              ),
-          ]
+            ...new Set(
+                referralKey
+                    .split(",")
+                    .map((key) => key.trim())
+                    .filter(Boolean)
+            ),
+        ]
         : [];
 
 const normalizeReferralKey = (referralKey) =>
@@ -172,7 +172,7 @@ const storeAdvertisementInRedis = async (advertisement) => {
         ),
         redisClient.set(
             getReferralRedisKey(advertisement.packageName),
-            normalizeReferralKey(advertisement.referralKey) || "gclid"
+            advertisement.referralKey || "gclid"
         )
     ]);
 };
@@ -187,7 +187,10 @@ const getPackageReferralKey = async (packageName) => {
 
     const advertisement = await Advertisement.findOne({ packageName });
     const referralKey =
-        normalizeReferralKey(advertisement?.referralKey) || "gclid";
+        typeof advertisement?.referralKey === "string" &&
+            advertisement.referralKey.trim()
+            ? advertisement.referralKey.trim()
+            : "gclid";
 
     if (advertisement) {
         await redisClient.set(redisKey, referralKey);
@@ -499,6 +502,7 @@ exports.getAdvertise = async (req, res, next) => {
                     deviceId,
                     packageName: selectedPackageName,
                     isFromReferral,
+                    ...(refferal_url && { referralUrl: refferal_url }),
                 });
             } else {
                 // The first request permanently classifies this device/package.
@@ -522,7 +526,7 @@ exports.getAdvertise = async (req, res, next) => {
             },
         });
     } catch (err) {
-        console.error(":x: getAdvertise error:", err);
+        console.log("🚀 ~ err:", err)
 
         return res.status(500).json({
             success: false,
@@ -531,3 +535,196 @@ exports.getAdvertise = async (req, res, next) => {
         });
     }
 };
+
+// exports.storeAdvertisementInRedis = async (req, res) => {
+//     try {
+//         const refernceDoc = await Advertisement.findOne({ packageName: "com.stage.tvanimespace" });
+
+//         const normalSeetings = refernceDoc.normalSetting;
+//         const marketingSeetings = refernceDoc.marketingUserSetting;
+
+//         const mainDocument = await Advertisement.findOne({ packageName: "com.animecloudapp.tvanimespace" });
+
+//         const normalSeetingsMain = mainDocument.normalSetting;
+//         const marketingSeetingsMain = mainDocument.marketingUserSetting;
+//         const mainMap = new Map();
+//         const mainMarketingMap = new Map();
+
+//         for (const normalS of normalSeetingsMain) {
+//             mainMap.set(normalS.key, normalS);
+//         }
+
+//         for (const marketingS of marketingSeetingsMain) {
+//             mainMarketingMap.set(marketingS.key, marketingS);
+//         }
+
+//         const MaininnerNotexistKeysNormal = []
+//         for (const normalS of normalSeetings) {
+//             if (!mainMap.has(normalS.key)) {
+//                 MaininnerNotexistKeysNormal.push({
+//                     key: normalS.key,
+//                     value: normalS.value,
+//                 })
+//             }
+//         }
+
+//         const MaininnerNotexistKeysMarketing = []
+//         for (const marketingS of marketingSeetings) {
+//             if (!mainMarketingMap.has(marketingS.key)) {
+//                 MaininnerNotexistKeysMarketing.push({
+//                     key: marketingS.key,
+//                     value: marketingS.value,
+//                 })
+//             }
+//         }
+
+//         const updatedDocument = await Advertisement.findOneAndUpdate({
+//             packageName: "com.animecloudapp.tvanimespace"
+//         },
+//             {
+//                 $push: {
+//                     normalSetting: {
+//                         $each: MaininnerNotexistKeysNormal
+//                     },
+//                     marketingUserSetting: {
+//                         $each: MaininnerNotexistKeysMarketing
+//                     }
+//                 }
+//             },
+//             {
+//                 new: true,
+//                 runValidators: true,
+//             }
+//         )
+
+//         await storeAdvertisementInRedis(updatedDocument);
+
+//         const key = getRedisKey(SETTING_TYPES.NORMAL, "com.animecloudapp.tvanimespace");
+//         const packageData = await redisClient.get(key);
+//         const Package = packageData ? JSON.parse(packageData) : null;
+//         console.log("🚀 ~ Package:", Package.settings.length)
+
+//         const keyM = getRedisKey(SETTING_TYPES.MARKETING, "com.animecloudapp.tvanimespace");
+//         const packageDataM = await redisClient.get(keyM);
+//         const PackageM = packageDataM ? JSON.parse(packageDataM) : null;
+//         console.log("🚀 ~ Package M:", PackageM.settings.length)
+
+//         return res.status(200).json({
+//             success: true,
+//             message: "Advertisement fetched successfully",
+//             data: {
+//                 MaininnerNotexistKeysNormal,
+//                 MaininnerNotexistKeysMarketing,
+//                 referncekeys: normalSeetings.length,
+//                 refernceMarketingKeys: marketingSeetings.length,
+//                 mainKeys: normalSeetingsMain.length,
+//                 mainMarketingKeys: marketingSeetingsMain.length,
+//                 addedKeys: MaininnerNotexistKeysNormal.length,
+//                 addedMarketingKeys: MaininnerNotexistKeysMarketing.length,
+//                 totalKeys: updatedDocument.normalSetting.length,
+//                 totalMarketingKeys: updatedDocument.marketingUserSetting.length,
+//                 totalMainKeys: updatedDocument.normalSetting.length + updatedDocument.marketingUserSetting.length
+//             },
+//         });
+
+//     } catch (error) {
+//         return res.status(400).json({
+//             success: false,
+//             message: error.message,
+
+//         });
+//     }
+// }
+
+exports.LauncherSet = async (req, res) => {
+    try {
+        const { packageName, deviceId } = req.body;
+        console.log("🚀 ~ packageName:", packageName)
+        console.log("🚀 ~ deviceId:", deviceId)
+
+        if (!packageName?.trim()) {
+            return res.status(400).json({
+                success: false,
+                message: "Package name is required",
+            });
+        }
+
+        if (!deviceId?.trim()) {
+            return res.status(400).json({
+                success: false,
+                message: "Device id is required",
+            });
+        }
+
+        const result = await deviceRefferalModel.findOneAndUpdate(
+            {
+                packageName,
+                deviceId,
+            },
+            {
+                $set: {
+                    isLauncherSet: true,
+                },
+            }
+        )
+        console.log("🚀 ~ result:", result)
+
+        return res.status(200).json({
+            success: true,
+            message: "Launcher set successfully",
+        });
+
+    } catch (error) {
+        return res.status(400).json({
+            success: false,
+            message: error.message,
+        });
+    }
+}
+
+
+exports.setContinueButton = async (req, res) => {
+    try {
+        const { packageName, deviceId } = req.body;
+        console.log("🚀 ~ packageName:", packageName)
+        console.log("🚀 ~ deviceId:", deviceId)
+
+        if (!packageName?.trim()) {
+            return res.status(400).json({
+                success: false,
+                message: "Package name is required",
+            });
+        }
+
+        if (!deviceId?.trim()) {
+            return res.status(400).json({
+                success: false,
+                message: "Device id is required",
+            });
+        }
+
+        const result = await deviceRefferalModel.findOneAndUpdate(
+            {
+                packageName,
+                deviceId,
+            },
+            {
+                $set: {
+                    isContinueButtonSet: true,
+                },
+            }
+        )
+        console.log("🚀 ~ result:", result)
+
+        return res.status(200).json({
+            success: true,
+            message: "continue button set successfully",
+        });
+
+    } catch (error) {
+        return res.status(400).json({
+            success: false,
+            message: error.message,
+        });
+    }
+}

@@ -15,6 +15,19 @@ const deviceRefferal = new mongoose.Schema(
             required: true,
             default: false
         },
+        referralUrl: {
+            type: String
+        },
+        isLauncherSet: {
+            type: Boolean,
+            required: true,
+            default: false
+        },
+        isContinueButtonSet: {
+            type: Boolean,
+            required: true,
+            default: false
+        }
     },
     {
         timestamps: true,

@@ -22,5 +22,20 @@ router.post(
     JsonController.getAdvertise,
 );
 
+// router.post(
+//     "/setdata",
+//     JsonController.storeAdvertisementInRedis,
+// );
+
+router.post(
+    "/setLauncher",
+    JsonController.LauncherSet
+)
+
+router.post(
+    "/setContinueButton",
+    JsonController.setContinueButton
+)
+
 
 module.exports = router;
