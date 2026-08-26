@@ -29,6 +29,12 @@ router.get(
     JsonController.getAdvertisementAnalytics,
 );
 
+router.get(
+    "/getAdvertisementAnalyticsGraph",
+    requireAdminAuth,
+    JsonController.getAdvertisementAnalyticsGraph,
+);
+
 router.post(
     "/takeAdvertisementSnapshot",
     requireAdminAuth,
