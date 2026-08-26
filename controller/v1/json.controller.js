@@ -8,6 +8,117 @@ const SETTING_TYPES = {
     MARKETING: "marketing",
 };
 
+const INDIA_TIME_OFFSET_MS = 330 * 60 * 1000;
+const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+
+const getIndiaDateStart = (year, monthIndex, day) =>
+    new Date(Date.UTC(year, monthIndex, day) - INDIA_TIME_OFFSET_MS);
+
+const getCurrentIndiaDateParts = () => {
+    const indiaNow = new Date(Date.now() + INDIA_TIME_OFFSET_MS);
+
+    return {
+        year: indiaNow.getUTCFullYear(),
+        monthIndex: indiaNow.getUTCMonth(),
+        day: indiaNow.getUTCDate(),
+    };
+};
+
+const parseIndiaDate = (value, fieldName) => {
+    if (typeof value !== "string") {
+        throw new Error(`${fieldName} is required in YYYY-MM-DD format`);
+    }
+
+    const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value.trim());
+
+    if (!match) {
+        throw new Error(`${fieldName} must use YYYY-MM-DD format`);
+    }
+
+    const year = Number(match[1]);
+    const monthIndex = Number(match[2]) - 1;
+    const day = Number(match[3]);
+    const validationDate = new Date(Date.UTC(year, monthIndex, day));
+
+    if (
+        validationDate.getUTCFullYear() !== year ||
+        validationDate.getUTCMonth() !== monthIndex ||
+        validationDate.getUTCDate() !== day
+    ) {
+        throw new Error(`${fieldName} must be a valid date`);
+    }
+
+    return getIndiaDateStart(year, monthIndex, day);
+};
+
+const getAnalyticsDateRange = ({ filter, startDate, endDate }) => {
+    const requestedFilter = String(filter || "today").trim().toLowerCase();
+    const normalizedFilter =
+        requestedFilter === "tommorrow" ? "tomorrow" : requestedFilter;
+    const { year, monthIndex, day } = getCurrentIndiaDateParts();
+    const todayStart = getIndiaDateStart(year, monthIndex, day);
+
+    if (normalizedFilter === "today") {
+        return {
+            filter: normalizedFilter,
+            startDate: todayStart,
+            endDate: new Date(todayStart.getTime() + ONE_DAY_MS),
+        };
+    }
+
+    // if (normalizedFilter === "tomorrow") {
+    //     return {
+    //         filter: normalizedFilter,
+    //         startDate: new Date(todayStart.getTime() + ONE_DAY_MS),
+    //         endDate: new Date(todayStart.getTime() + 2 * ONE_DAY_MS),
+    //     };
+    // }
+
+    if (normalizedFilter === "yesterday") {
+        return {
+            filter: normalizedFilter,
+            startDate: new Date(todayStart.getTime() - ONE_DAY_MS),
+            endDate: todayStart,
+        };
+    }
+
+    if (normalizedFilter === "week") {
+        return {
+            filter: normalizedFilter,
+            startDate: new Date(todayStart.getTime() - 6 * ONE_DAY_MS),
+            endDate: new Date(todayStart.getTime() + ONE_DAY_MS),
+        };
+    }
+
+    if (normalizedFilter === "month") {
+        return {
+            filter: normalizedFilter,
+            startDate: getIndiaDateStart(year, monthIndex, 1),
+            endDate: getIndiaDateStart(year, monthIndex + 1, 1),
+        };
+    }
+
+    if (normalizedFilter === "custom") {
+        const customStartDate = parseIndiaDate(startDate, "startDate");
+        const customEndDate = parseIndiaDate(endDate, "endDate");
+
+        if (customStartDate > customEndDate) {
+            throw new Error("startDate must be before or equal to endDate");
+        }
+
+        return {
+            filter: normalizedFilter,
+            startDate: customStartDate,
+            // The supplied end date is inclusive.
+            endDate: new Date(customEndDate.getTime() + ONE_DAY_MS),
+        };
+    }
+
+    throw new Error(
+        "filter must be today, tomorrow, week, month, or custom"
+    );
+};
+
 const getRedisKey = (settingType, packageName) =>
     settingType === SETTING_TYPES.MARKETING
         ? `advertisement:${packageName}`
@@ -353,68 +464,10 @@ exports.getAdvertisement = async (req, res, next) => {
             .limit(limit)
             .lean();
 
-        const packageNames = advertisements.map(
-            (advertisement) => advertisement.packageName
-        );
-
-        const deviceCounts = await deviceRefferalModel.aggregate([
-            {
-                $match: {
-                    packageName: { $in: packageNames },
-                    $or: [
-                        { isLauncherSet: true },
-                        { isContinueButtonSet: true },
-                    ],
-                },
-            },
-            {
-                // Count every device only once inside each package.
-                $group: {
-                    _id: {
-                        packageName: "$packageName",
-                        deviceId: "$deviceId",
-                    },
-                    isLauncherSet: {
-                        $max: { $cond: ["$isLauncherSet", 1, 0] },
-                    },
-                    isContinueButtonSet: {
-                        $max: { $cond: ["$isContinueButtonSet", 1, 0] },
-                    },
-                },
-            },
-            {
-                $group: {
-                    _id: "$_id.packageName",
-                    isLauncherSetDeviceCount: { $sum: "$isLauncherSet" },
-                    isContinueButtonSetDeviceCount: {
-                        $sum: "$isContinueButtonSet",
-                    },
-                },
-            },
-        ]);
-
-        const deviceCountMap = new Map(
-            deviceCounts.map((count) => [count._id, count])
-        );
-
-        const advertisementsWithDeviceCounts = advertisements.map(
-            (advertisement) => {
-                const counts = deviceCountMap.get(advertisement.packageName);
-
-                return {
-                    ...advertisement,
-                    isLauncherSetDeviceCount:
-                        counts?.isLauncherSetDeviceCount || 0,
-                    isContinueButtonSetDeviceCount:
-                        counts?.isContinueButtonSetDeviceCount || 0,
-                };
-            }
-        );
-
         return res.status(200).json({
             success: true,
             message: "Advertisement fetched successfully",
-            data: advertisementsWithDeviceCounts,
+            data: advertisements,
             page,
             totalPages: Math.ceil(totalAdvertisements / limit),
             totalCount: totalAdvertisements,
@@ -427,6 +480,166 @@ exports.getAdvertisement = async (req, res, next) => {
             success: false,
             message: "Failed to fetch advertisement configuration",
             error: err.message,
+        });
+    }
+};
+
+exports.getAdvertisementAnalytics = async (req, res) => {
+    try {
+        const packageName = req.query.packageName?.trim();
+
+        if (!packageName) {
+            return res.status(400).json({
+                success: false,
+                message: "Package name is required",
+            });
+        }
+
+        let dateRange;
+
+        try {
+            dateRange = getAnalyticsDateRange({
+                filter: req.query.filter,
+                startDate: req.query.startDate ?? req.query.fromDate,
+                endDate: req.query.endDate ?? req.query.toDate,
+            });
+        } catch (error) {
+            return res.status(400).json({
+                success: false,
+                message: error.message,
+            });
+        }
+
+        const advertisementExists = await Advertisement.exists({
+            packageName,
+        });
+
+        if (!advertisementExists) {
+            return res.status(404).json({
+                success: false,
+                message: "Advertisement configuration not found",
+            });
+        }
+
+        const [analytics = {}] = await deviceRefferalModel.aggregate([
+            {
+                $match: {
+                    packageName,
+                    createdAt: {
+                        $gte: dateRange.startDate,
+                        $lt: dateRange.endDate,
+                    },
+                },
+            },
+            {
+                // Treat one deviceId as one user inside the package/date range.
+                $group: {
+                    _id: "$deviceId",
+                    isFromReferral: {
+                        $max: {
+                            $cond: [
+                                { $eq: ["$isFromReferral", true] },
+                                1,
+                                0,
+                            ],
+                        },
+                    },
+                    isLauncherSet: {
+                        $max: {
+                            $cond: [
+                                { $eq: ["$isLauncherSet", true] },
+                                1,
+                                0,
+                            ],
+                        },
+                    },
+                },
+            },
+            {
+                $group: {
+                    _id: null,
+                    totalUsers: { $sum: 1 },
+                    marketingUsers: { $sum: "$isFromReferral" },
+                    normalUsers: {
+                        $sum: {
+                            $cond: [
+                                { $eq: ["$isFromReferral", 0] },
+                                1,
+                                0,
+                            ],
+                        },
+                    },
+                    launcherSetTotalUsers: { $sum: "$isLauncherSet" },
+                    marketingLauncherSetUsers: {
+                        $sum: {
+                            $cond: [
+                                {
+                                    $and: [
+                                        { $eq: ["$isFromReferral", 1] },
+                                        { $eq: ["$isLauncherSet", 1] },
+                                    ],
+                                },
+                                1,
+                                0,
+                            ],
+                        },
+                    },
+                    normalLauncherSetUsers: {
+                        $sum: {
+                            $cond: [
+                                {
+                                    $and: [
+                                        { $eq: ["$isFromReferral", 0] },
+                                        { $eq: ["$isLauncherSet", 1] },
+                                    ],
+                                },
+                                1,
+                                0,
+                            ],
+                        },
+                    },
+                },
+            },
+            {
+                $project: {
+                    _id: 0,
+                    totalUsers: 1,
+                    marketingUsers: 1,
+                    normalUsers: 1,
+                    launcherSetTotalUsers: 1,
+                    marketingLauncherSetUsers: 1,
+                    normalLauncherSetUsers: 1,
+                },
+            },
+        ]);
+
+        return res.status(200).json({
+            success: true,
+            message: "Advertisement analytics fetched successfully",
+            data: {
+                packageName,
+                filter: dateRange.filter,
+                timezone: "Asia/Kolkata",
+                startDate: dateRange.startDate,
+                endDateExclusive: dateRange.endDate,
+                totalUsers: analytics.totalUsers || 0,
+                marketingUsers: analytics.marketingUsers || 0,
+                normalUsers: analytics.normalUsers || 0,
+                launcherSetTotalUsers:
+                    analytics.launcherSetTotalUsers || 0,
+                marketingLauncherSetUsers:
+                    analytics.marketingLauncherSetUsers || 0,
+                normalLauncherSetUsers:
+                    analytics.normalLauncherSetUsers || 0,
+            },
+        });
+    } catch (error) {
+        console.error("Error fetching advertisement analytics:", error);
+
+        return res.status(500).json({
+            success: false,
+            message: "Failed to fetch advertisement analytics",
+            error: error.message,
         });
     }
 };
