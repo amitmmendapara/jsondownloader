@@ -119,6 +119,85 @@ const getAnalyticsDateRange = ({ filter, startDate, endDate }) => {
     );
 };
 
+const GRAPH_METRIC_FIELDS = [
+    "totalUsers",
+    "marketingUsers",
+    "normalUsers",
+    "launcherSetTotalUsers",
+    "marketingLauncherSetUsers",
+    "normalLauncherSetUsers",
+];
+
+const getGraphBucketConfig = (dateRange) => {
+    const useHourlyBuckets = ["today", "tomorrow", "yesterday"].includes(
+        dateRange.filter
+    );
+
+    return {
+        interval: useHourlyBuckets ? "hour" : "day",
+        stepMs: useHourlyBuckets ? 60 * 60 * 1000 : ONE_DAY_MS,
+    };
+};
+
+const getGraphPointLabel = (timestamp, interval) => {
+    const indiaDate = new Date(timestamp.getTime() + INDIA_TIME_OFFSET_MS);
+    const pad = (value) => String(value).padStart(2, "0");
+
+    if (interval === "hour") {
+        return `${pad(indiaDate.getUTCHours())}:00`;
+    }
+
+    return [
+        indiaDate.getUTCFullYear(),
+        pad(indiaDate.getUTCMonth() + 1),
+        pad(indiaDate.getUTCDate()),
+    ].join("-");
+};
+
+const getEmptyGraphMetrics = () =>
+    Object.fromEntries(GRAPH_METRIC_FIELDS.map((field) => [field, 0]));
+
+const buildCompleteGraphSeries = (graphPoints, dateRange, bucketConfig) => {
+    const graphPointMap = new Map(
+        graphPoints.map((point) => [
+            new Date(point.timestamp).getTime(),
+            point,
+        ])
+    );
+    const series = [];
+
+    for (
+        let timestamp = dateRange.startDate.getTime();
+        timestamp < dateRange.endDate.getTime();
+        timestamp += bucketConfig.stepMs
+    ) {
+        const pointDate = new Date(timestamp);
+        const sourcePoint = graphPointMap.get(timestamp);
+        const metrics = getEmptyGraphMetrics();
+
+        for (const field of GRAPH_METRIC_FIELDS) {
+            metrics[field] = Number(sourcePoint?.[field]) || 0;
+        }
+
+        series.push({
+            timestamp: pointDate,
+            label: getGraphPointLabel(pointDate, bucketConfig.interval),
+            ...metrics,
+        });
+    }
+
+    return series;
+};
+
+const getGraphTotals = (series) =>
+    series.reduce((totals, point) => {
+        for (const field of GRAPH_METRIC_FIELDS) {
+            totals[field] += point[field];
+        }
+
+        return totals;
+    }, getEmptyGraphMetrics());
+
 const getRedisKey = (settingType, packageName) =>
     settingType === SETTING_TYPES.MARKETING
         ? `advertisement:${packageName}`
@@ -639,6 +718,193 @@ exports.getAdvertisementAnalytics = async (req, res) => {
         return res.status(500).json({
             success: false,
             message: "Failed to fetch advertisement analytics",
+            error: error.message,
+        });
+    }
+};
+
+exports.getAdvertisementAnalyticsGraph = async (req, res) => {
+    try {
+        const packageName = req.query.packageName?.trim();
+
+        if (!packageName) {
+            return res.status(400).json({
+                success: false,
+                message: "Package name is required",
+            });
+        }
+
+        let dateRange;
+
+        try {
+            dateRange = getAnalyticsDateRange({
+                filter: req.query.filter,
+                startDate: req.query.startDate ?? req.query.fromDate,
+                endDate: req.query.endDate ?? req.query.toDate,
+            });
+        } catch (error) {
+            return res.status(400).json({
+                success: false,
+                message: error.message,
+            });
+        }
+
+        const bucketConfig = getGraphBucketConfig(dateRange);
+        const numberOfPoints = Math.ceil(
+            (dateRange.endDate - dateRange.startDate) /
+                bucketConfig.stepMs
+        );
+
+        if (numberOfPoints > 366) {
+            return res.status(400).json({
+                success: false,
+                message: "Graph date range cannot exceed 366 points",
+            });
+        }
+
+        const advertisementExists = await Advertisement.exists({
+            packageName,
+        });
+
+        if (!advertisementExists) {
+            return res.status(404).json({
+                success: false,
+                message: "Advertisement configuration not found",
+            });
+        }
+
+        const graphPoints = await deviceRefferalModel.aggregate([
+            {
+                $match: {
+                    packageName,
+                    createdAt: {
+                        $gte: dateRange.startDate,
+                        $lt: dateRange.endDate,
+                    },
+                },
+            },
+            {
+                // Assign every unique device to its first createdAt bucket.
+                $group: {
+                    _id: "$deviceId",
+                    createdAt: { $min: "$createdAt" },
+                    isFromReferral: {
+                        $max: {
+                            $cond: [
+                                { $eq: ["$isFromReferral", true] },
+                                1,
+                                0,
+                            ],
+                        },
+                    },
+                    isLauncherSet: {
+                        $max: {
+                            $cond: [
+                                { $eq: ["$isLauncherSet", true] },
+                                1,
+                                0,
+                            ],
+                        },
+                    },
+                },
+            },
+            {
+                $set: {
+                    graphBucket: {
+                        $dateTrunc: {
+                            date: "$createdAt",
+                            unit: bucketConfig.interval,
+                            timezone: "Asia/Kolkata",
+                        },
+                    },
+                },
+            },
+            {
+                $group: {
+                    _id: "$graphBucket",
+                    totalUsers: { $sum: 1 },
+                    marketingUsers: { $sum: "$isFromReferral" },
+                    normalUsers: {
+                        $sum: {
+                            $cond: [
+                                { $eq: ["$isFromReferral", 0] },
+                                1,
+                                0,
+                            ],
+                        },
+                    },
+                    launcherSetTotalUsers: { $sum: "$isLauncherSet" },
+                    marketingLauncherSetUsers: {
+                        $sum: {
+                            $cond: [
+                                {
+                                    $and: [
+                                        { $eq: ["$isFromReferral", 1] },
+                                        { $eq: ["$isLauncherSet", 1] },
+                                    ],
+                                },
+                                1,
+                                0,
+                            ],
+                        },
+                    },
+                    normalLauncherSetUsers: {
+                        $sum: {
+                            $cond: [
+                                {
+                                    $and: [
+                                        { $eq: ["$isFromReferral", 0] },
+                                        { $eq: ["$isLauncherSet", 1] },
+                                    ],
+                                },
+                                1,
+                                0,
+                            ],
+                        },
+                    },
+                },
+            },
+            {
+                $project: {
+                    _id: 0,
+                    timestamp: "$_id",
+                    totalUsers: 1,
+                    marketingUsers: 1,
+                    normalUsers: 1,
+                    launcherSetTotalUsers: 1,
+                    marketingLauncherSetUsers: 1,
+                    normalLauncherSetUsers: 1,
+                },
+            },
+            { $sort: { timestamp: 1 } },
+        ]);
+
+        const series = buildCompleteGraphSeries(
+            graphPoints,
+            dateRange,
+            bucketConfig
+        );
+
+        return res.status(200).json({
+            success: true,
+            message: "Advertisement graph analytics fetched successfully",
+            data: {
+                packageName,
+                filter: dateRange.filter,
+                timezone: "Asia/Kolkata",
+                interval: bucketConfig.interval,
+                startDate: dateRange.startDate,
+                endDateExclusive: dateRange.endDate,
+                totals: getGraphTotals(series),
+                series,
+            },
+        });
+    } catch (error) {
+        console.error("Error fetching advertisement graph analytics:", error);
+
+        return res.status(500).json({
+            success: false,
+            message: "Failed to fetch advertisement graph analytics",
             error: error.message,
         });
     }
